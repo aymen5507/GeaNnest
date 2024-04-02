@@ -23,7 +23,7 @@ const PERCENTAGE_TAKEN_FROM_RIDES = 0.2;
  * which the drivers are listening to and, if they are within range, then they will be able to accept
  * the ride
  */
-exports.newRequest = functions.database.ref('/ride_info/{pushId}').onCreate(async (snapshot, context) => {
+exports.newRequest = functions.database.ref('/ball_rental/{pushId}').onCreate(async (snapshot, context) => {
     // Grab the current value of what was written to the Realtime Database.
     const original = snapshot.val();
 
@@ -32,15 +32,15 @@ exports.newRequest = functions.database.ref('/ride_info/{pushId}').onCreate(asyn
         const customerPayment = await (await isCustomerPaymentReady(original.customerId)).success;
         console.log(customerPayment)
         if (!customerPayment) {
-            await admin.database().ref().child(`ride_info/${context.params.pushId}`).update({ cancelled: true, cancelled_info: { type: 11, reason: 'No default payment method available' } });
+            await admin.database().ref().child(`ball_rental/${context.params.pushId}`).update({ cancelled: true, cancelled_info: { type: 11, reason: 'No default payment method available' } });
             return Promise.reject(new Error("No payment method available"));
         }
 
     }
-    await admin.database().ref().child(`ride_info/${context.params.pushId}`).update({ price_calculated: false });
+    await admin.database().ref().child(`ball_rental/${context.params.pushId}`).update({ price_calculated: false });
 
     //Create geofire location with the pickup location of the request
-    let geoFireRef = admin.database().ref().child('customer_requests');
+    let geoFireRef = admin.database().ref().child('ball_rental_requests');
     let geoFireApp = new geofire.GeoFire(geoFireRef);
     await geoFireApp.set(context.params.pushId, [original.pickup.lat, original.pickup.lng]);
 
@@ -53,76 +53,60 @@ exports.newRequest = functions.database.ref('/ride_info/{pushId}').onCreate(asyn
  * It will listen for cancel events or end events and, if a ride has ended, then calculate
  * the ride price
  */
-exports.requestListener = functions.database.ref('/ride_info/{pushId}').onUpdate(async (snapshot, context) => {
+exports.requestListener = functions.database.ref('/ball_rental/{pushId}').onUpdate(async (snapshot, context) => {
     const id_customer = snapshot.after.val().customerId;
-    const id_driver = snapshot.after.val().driverId;
     const id_ride = context.params.pushId;
 
     if (snapshot.after.val().ended || snapshot.after.val().cancelled) {
-        let geoFireRef = admin.database().ref().child('customer_requests');
+        let geoFireRef = admin.database().ref().child('ball_rental_requests');
         let geoFireApp = new geofire.GeoFire(geoFireRef);
         await geoFireApp.remove(context.params.pushId);
     }
-    if ((!snapshot.after.val().ended && !snapshot.after.val().cancelled) && Math.abs(snapshot.after.val().timestamp_last_driver_read - snapshot.after.val().creation_timestamp) / 1000 > REQUEST_TIMEOUT_SECONDS) {
-        let geoFireRef = admin.database().ref().child('customer_requests');
+    if ((!snapshot.after.val().ended && !snapshot.after.val().cancelled) && Math.abs(snapshot.after.val().timestamp_last_customer_read - snapshot.after.val().creation_timestamp) / 1000 > REQUEST_TIMEOUT_SECONDS) {
+        let geoFireRef = admin.database().ref().child('ball_rental_requests');
         let geoFireApp = new geofire.GeoFire(geoFireRef);
         await geoFireApp.remove(context.params.pushId);
-        await admin.database().ref().child(`ride_info/${id_ride}`).update({ cancelled: true, cancelled_info: { type: 10, reason: 'No driver found' } });
+        await admin.database().ref().child(`ball_rental/${id_ride}`).update({ cancelled: true, cancelled_info: { type: 10, reason: 'No customer found' } });
 
         return;
     }
     if (!snapshot.after.val().rating_calculated && snapshot.after.val().rating !== -1) {
-        await admin.database().ref(`Users/Drivers/${id_driver}/rating/${id_ride}`).set(snapshot.after.val().rating);
-        await admin.database().ref(`/ride_info/${id_ride}`).update({rating_calculated: true});
-        
+        await admin.database().ref(`/ball_rental/${id_ride}`).update({ rating_calculated: true });
     }
+}
 
     if (!snapshot.after.val().ended) { return; }
     if (snapshot.after.val().price_calculated) { return; }
 
-    //Gets values of ride from the snap and initialize them
-    var distance = Number(snapshot.after.val().distance);
-    var price = Number(distance) * 0.5;
-    //calculate duration of rides in minutes
-    var duration = Number(((snapshot.after.val().timestamp - snapshot.after.val().timestamp_picked_customer) / 60000) % 60);
+    //Gets values of rental from the snap and initialize them
+    var duration = Number(((snapshot.after.val().timestamp_end - snapshot.after.val().timestamp_start) / 60000) % 60);
+    var price = Number(duration) * 0.5;
 
-    //Calculates the final price for each ride price
-    switch (snapshot.after.val().service) {
+    //Calculates the final price for each rental
+    switch (snapshot.after.val().type) {
         case "type_1":
-            price = 1 + distance * 1 + duration * 1;
+            price = 1 + duration * 1;
             break;
         case "type_2":
-            price = 2 + distance * 2 + duration * 2;
+            price = 2 + duration * 2;
             break;
         case "type_3":
-            price = 3 + distance * 3 + duration * 3;
+            price = 3 + duration * 3;
             break;
         case "type_4":
-            price = 4 + distance * 4 + duration * 4;
+            price = 4 + duration * 4;
             break;
         case "type_5":
-            price = 5 + distance * 5 + duration * 5;
+            price = 5 + duration * 5;
             break;
     }
 
     //Updates the customer stripe with the new charge which will be called in another function
-    await admin.database().ref(`stripe_customers/${id_customer}/charges/${id_ride}`).update({ amount: price })
+    await admin.database().ref(`stripe_customers/${id_customer}/charges/${id_rental}`).update({ amount: price })
 
-    let currentPayout = await admin.database().ref(`Users/Drivers/${id_driver}/payout_amount/`).once('value');
-
-    let payoutAmount = currentPayout.val();
-    if (payoutAmount === undefined) {
-        payoutAmount = 0;
-    }
-
-    const payoutFinal = payoutAmount + (price * PERCENTAGE_TAKEN_FROM_RIDES);
-
-    //update the driver db with the new payout ammount
-    await admin.database().ref(`Users/Drivers/${id_driver}`).update({ payout_amount: payoutFinal });
-    await admin.database().ref(`/ride_info/${id_ride}`).update({price, price_calculated: true});
+    await admin.database().ref(`/ball_rental/${id_rental}`).update({ price, price_calculated: true });
 
 });
-
 
 /**
  * check if user as a credit card enabled with stripe
@@ -155,7 +139,7 @@ async function isCustomerPaymentReady(uid) {
  * @param {*} paymentId id of the payout
  */
 function updatePayoutPending(uid, paymentId) {
-    return admin.database().ref('ride_info/').orderByChild("driverId").equalTo(uid).once('value').then((snap) => {
+    return admin.database().ref('ball_rental/').orderByChild("driverId").equalTo(uid).once('value').then((snap) => {
         if (snap === null) {
             throw new Error("profile doesn't exist");
         }
@@ -163,7 +147,7 @@ function updatePayoutPending(uid, paymentId) {
         if (snap.hasChildren()) {
             snap.forEach(element => {
                 if (element.val() === true) {
-                    admin.database().ref('ride_info/' + element.key + 'payout').set({
+                    admin.database().ref('ball_rental/' + element.key + '/payout').set({
                         driverPaidOut: true,
                         timestamp: admin.database.ServerValue.TIMESTAMP,
                         paymentId: paymentId
@@ -319,15 +303,14 @@ exports.listCustomerCards = functions.https.onRequest(async (request, response) 
 
 
 /**
- * When a driver sets up the account to be eligeble to payout this function is called
- * Saves the important info and notifies the db that this driver is able to receive
- * a payout
+ * When a user sets up the account to be eligible to receive payouts, this function is called.
+ * It saves the important information and notifies the database that this user is able to receive a payout.
  */
 exports.createStripeConnectAccount = functions.https.onRequest(async (request, response) => {
     let code = request.body.code;
     let state = request.body.state;
 
-    const snapshot = await admin.database().ref(`Users/Drivers/`).orderByChild('connect_code').equalTo(state).once('value')
+    const snapshot = await admin.database().ref(`Users/BallRenters/`).orderByChild('connect_code').equalTo(state).once('value')
     let uid = Object.keys(snapshot.val())[0];
 
     var connect_account = await stripe.oauth.token({
@@ -336,14 +319,14 @@ exports.createStripeConnectAccount = functions.https.onRequest(async (request, r
     });
 
     await admin.database().ref(`/stripe_customers/${uid}`).update({ connect_account });
-    await admin.database().ref(`Users/Drivers/${uid}/connect_set`).set(true);
+    await admin.database().ref(`Users/BallRenters/${uid}/connect_set`).set(true);
 
-    response.send(connected_account_id)
+    response.send(connect_account.connected_account_id);
 });
 
 
 /**
- * Starts a payout intent for a driver.
+ * Starts a payout intent for a ball rental.
  * 
  * Make sure the stripe account has cash flow big enough to handle this requests.
  */
@@ -353,7 +336,7 @@ exports.payout = functions.https.onRequest(async (request, response) => {
         console.log({ balance: balance.available, err })
     });
 
-    let payoutAmount = await admin.database().ref().child(`Users/Drivers/${request.body.uid}/payout_amount/`).once('value')
+    let payoutAmount = await admin.database().ref().child(`Users/BallRenters/${request.body.uid}/payout_amount/`).once('value')
     payoutAmount = payoutAmount.val() * 100;
     const snapshot = await admin.database().ref().child(`stripe_customers/${request.body.uid}/connect_account/stripe_user_id`).once('value')
     const userConnectId = snapshot.val();
@@ -374,7 +357,7 @@ exports.payout = functions.https.onRequest(async (request, response) => {
     await admin.database().ref(`stripe_customers/${request.body.uid}/payouts`).push();
 
     updatePayoutPending(request.body.uid, result.id).then(() => {
-        return admin.database().ref('/Users/Drivers/' + request.body.uid + '/payout_amount/').set(0).then(() => {
+        return admin.database().ref('/Users/BallRenters/' + request.body.uid + '/payout_amount/').set(0).then(() => {
             response.status('200').end();
             return;
         });
